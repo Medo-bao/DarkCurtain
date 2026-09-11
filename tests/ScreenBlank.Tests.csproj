@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ScreenBlank</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\*.cs" Exclude="..\Program.cs" />
+    <EmbeddedResource Include="..\Assets\icon.ico" LogicalName="ScreenBlank.Assets.icon.ico" />
+    <PackageReference Include="System.Management" Version="9.0.0" />
+  </ItemGroup>
+</Project>
