@@ -6,6 +6,7 @@ internal static class NativeMethods
 {
     internal const int WM_SYSCOMMAND = 0x0112;
     internal const int SC_MONITORPOWER = 0xF170;
+    internal const int MonitorPowerOn = -1;
     internal const int HWND_BROADCAST = 0xFFFF;
     internal const int WM_HOTKEY = 0x0312;
     internal const int HWND_TOPMOST = -1;
@@ -25,6 +26,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "SendNotifyMessageW", SetLastError = true)]
+    internal static extern bool SendNotifyMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
     internal static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -64,6 +68,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr CreateIconIndirect(ref ICONINFO iconInfo);
+
+    [DllImport("user32.dll")]
+    internal static extern bool DestroyCursor(IntPtr cursor);
 
     [DllImport("gdi32.dll")]
     internal static extern bool DeleteObject(IntPtr hObject);
@@ -139,7 +146,14 @@ internal static class NativeMethods
 
     internal static void SetDisplayPower(int powerState)
     {
-        _ = SendMessage(new IntPtr(HWND_BROADCAST), WM_SYSCOMMAND, new IntPtr(SC_MONITORPOWER), new IntPtr(powerState));
+        if (!NotifyDisplayPower(new IntPtr(HWND_BROADCAST), powerState))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    internal static bool NotifyDisplayPower(IntPtr window, int powerState)
+    {
+        // Other applications must not block our UI while handling a power notification.
+        return SendNotifyMessage(window, WM_SYSCOMMAND, new IntPtr(SC_MONITORPOWER), new IntPtr(powerState));
     }
 
 }

@@ -8,6 +8,7 @@ internal sealed class MainForm : Form
     private const int HotkeyId = 1;
     private const uint ModControl = 0x0002;
     private const uint ModAlt = 0x0001;
+    private const uint ModNoRepeat = 0x4000;
     private const uint VkB = 0x42;
 
     private readonly NotifyIcon _trayIcon;
@@ -17,20 +18,36 @@ internal sealed class MainForm : Form
     private readonly ShutdownSchedule _shutdown;
     private readonly System.Windows.Forms.Timer _shutdownTimer;
     private readonly List<BlankOverlay> _overlays = [];
-    private readonly System.Windows.Forms.Timer _reBlankTimer;
     private readonly System.Windows.Forms.Timer _overlayTimer;
     private readonly DragSmooth _dragSmooth;
     private readonly GammaDim _gammaDim = new();
+    private readonly Action _restoreBrightness;
+    private readonly Action<CancellationToken> _applyBrightness;
+    private readonly TimeSpan _restoreTimeout;
+    private readonly Action<int> _setDisplayPower;
+    private bool _monitorPowerBlanked;
+    private CancellationTokenSource? _dimmingCancellation;
+    private Task _displayApply = Task.CompletedTask;
+    private Task _displayRestore = Task.CompletedTask;
+    private bool _waitingForRestore;
+    private bool _restoreWaitFinished;
     private bool _blanked;
     private bool _cursorHidden;
     private bool _exiting;
     private bool _cleanupDone;
     private bool _initialVisibilityHandled;
     private bool _restoringWindow;
+    private SettingsForm? _settingsForm;
 
-    public MainForm(Settings settings)
+    public MainForm(Settings settings, Action? restoreBrightness = null, Func<Task>? requestShutdown = null,
+        Action<CancellationToken>? applyBrightness = null, TimeSpan? restoreTimeout = null,
+        Action<int>? setDisplayPower = null)
     {
         _settings = settings;
+        _restoreBrightness = restoreBrightness ?? _gammaDim.Restore;
+        _applyBrightness = applyBrightness ?? _gammaDim.Apply;
+        _restoreTimeout = restoreTimeout ?? TimeSpan.FromSeconds(3);
+        _setDisplayPower = setDisplayPower ?? NativeMethods.SetDisplayPower;
         _dragSmooth = new DragSmooth(this);
 
         Text = "暗黑天幕";
@@ -45,8 +62,15 @@ internal sealed class MainForm : Form
         _shutdown = new ShutdownSchedule(async () =>
         {
             Unblank();
-            await ShutdownSchedule.RequestShutdownAsync();
-        });
+            await WaitForDisplayRestoreAsync();
+            if (!_exiting) await (requestShutdown ?? ShutdownSchedule.RequestShutdownAsync)();
+        }, windowsDueAt: settings.WindowsShutdownDueAt);
+        _shutdown.Changed += () =>
+        {
+            if (_settings.WindowsShutdownDueAt == _shutdown.WindowsDueAt) return;
+            _settings.WindowsShutdownDueAt = _shutdown.WindowsDueAt;
+            SettingsStore.Save(_settings);
+        };
         _shutdownTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         _shutdownTimer.Tick += async (_, _) => await _shutdown.TickAsync();
         _shutdownTimer.Start();
@@ -94,15 +118,6 @@ internal sealed class MainForm : Form
         };
         _trayIcon.DoubleClick += (_, _) => ShowMainWindow();
 
-        _reBlankTimer = new System.Windows.Forms.Timer { Interval = 4000 };
-        _reBlankTimer.Tick += (_, _) =>
-        {
-            if (_blanked && _settings.MonitorPowerOff)
-            {
-                NativeMethods.SetDisplayPower(2);
-            }
-        };
-
         _overlayTimer = new System.Windows.Forms.Timer { Interval = 250 };
         _overlayTimer.Tick += (_, _) => EnsureOverlaysOnTop();
 
@@ -113,7 +128,7 @@ internal sealed class MainForm : Form
 
     private void RegisterHotkey()
     {
-        if (NativeMethods.RegisterHotKey(Handle, HotkeyId, ModControl | ModAlt, VkB))
+        if (NativeMethods.RegisterHotKey(Handle, HotkeyId, ModControl | ModAlt | ModNoRepeat, VkB))
         {
             return;
         }
@@ -145,6 +160,7 @@ internal sealed class MainForm : Form
 
     internal void ShowMainWindow()
     {
+        if (IsDisposed || _exiting) return;
         _initialVisibilityHandled = true;
         _restoringWindow = true;
         try
@@ -178,18 +194,30 @@ internal sealed class MainForm : Form
 
     private void ShowSettings()
     {
-        using SettingsForm form = new(_settings, _shutdown);
-        if (form.ShowDialog(this) == DialogResult.OK)
+        if (_exiting || IsDisposed) return;
+        if (_settingsForm is { IsDisposed: false })
         {
-            _settings.MonitorPowerOff = form.MonitorPowerOff;
-            _settings.StartToTray = form.StartToTray;
-            _settings.CloseExits = form.CloseExits;
-            _settings.AutoStart = form.AutoStart;
+            _settingsForm.Activate();
+            return;
         }
-        _settings.SettingsWindowX = form.Location.X;
-        _settings.SettingsWindowY = form.Location.Y;
-        SettingsStore.Save(_settings);
-        StartupManager.Apply(_settings.AutoStart);
+        using SettingsForm form = new(_settings, _shutdown);
+        _settingsForm = form;
+        try
+        {
+            if (form.ShowDialog(this) == DialogResult.OK)
+            {
+                _settings.MonitorPowerOff = form.MonitorPowerOff;
+                _settings.StartToTray = form.StartToTray;
+                _settings.CloseExits = form.CloseExits;
+                _settings.AutoStart = form.AutoStart;
+                _settings.UseWindowsShutdownCommand = form.UseWindowsShutdownCommand;
+            }
+            _settings.SettingsWindowX = form.Location.X;
+            _settings.SettingsWindowY = form.Location.Y;
+            SettingsStore.Save(_settings);
+            StartupManager.Apply(_settings.AutoStart);
+        }
+        finally { _settingsForm = null; }
     }
 
     private void ToggleBlank()
@@ -204,20 +232,36 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void Blank()
+    private async void Blank()
     {
-        if (_blanked)
+        if (_blanked || (!_settings.MonitorPowerOff && !_displayRestore.IsCompleted) || _shutdown.IsExecuting || _exiting)
         {
             return;
         }
 
         _blanked = true;
+        _monitorPowerBlanked = _settings.MonitorPowerOff;
+        _dimmingCancellation?.Dispose();
+        _dimmingCancellation = new CancellationTokenSource();
+        CancellationToken token = _dimmingCancellation.Token;
         try
         {
             UpdateStatus();
+            if (_monitorPowerBlanked)
+            {
+                NativeMethods.SetThreadExecutionState(
+                    NativeMethods.ES_CONTINUOUS | NativeMethods.ES_SYSTEM_REQUIRED);
+                if (!TrySetDisplayPower(2))
+                {
+                    _blanked = false;
+                    _monitorPowerBlanked = false;
+                    UpdateStatus();
+                    NativeMethods.SetThreadExecutionState(NativeMethods.ES_CONTINUOUS);
+                }
+                return;
+            }
             HideSystemCursor();
             _cursorHidden = true;
-            _gammaDim.Apply();
             NativeMethods.SetThreadExecutionState(
                 NativeMethods.ES_CONTINUOUS | NativeMethods.ES_SYSTEM_REQUIRED | NativeMethods.ES_DISPLAY_REQUIRED);
 
@@ -225,22 +269,20 @@ internal sealed class MainForm : Form
             {
                 BlankOverlay overlay = new(screen.Bounds);
                 overlay.DoubleClicked += Unblank;
-                overlay.Show(this);
                 _overlays.Add(overlay);
+                overlay.Show(this);
             }
 
-            Application.DoEvents();
             EnsureOverlaysOnTop();
             _overlayTimer.Start();
-            if (_settings.MonitorPowerOff)
-            {
-                NativeMethods.SetDisplayPower(2);
-                _reBlankTimer.Start();
-            }
+            if (token.IsCancellationRequested) return;
+            _displayApply = Task.Run(() => _applyBrightness(token));
+            await _displayApply;
+            if (token.IsCancellationRequested || !_blanked || _exiting || IsDisposed) return;
         }
         catch (Exception)
         {
-            CleanupBlankState();
+            if (!token.IsCancellationRequested && !IsDisposed && _blanked) Unblank();
         }
     }
 
@@ -251,6 +293,8 @@ internal sealed class MainForm : Form
             return;
         }
 
+        // Keep the active mode on failure so the same hotkey can retry waking it.
+        if (_monitorPowerBlanked && !TrySetDisplayPower(NativeMethods.MonitorPowerOn) && !_exiting) return;
         _blanked = false;
         UpdateStatus();
         if (_cursorHidden)
@@ -258,13 +302,12 @@ internal sealed class MainForm : Form
             RestoreSystemCursor();
             _cursorHidden = false;
         }
-        _gammaDim.Restore();
-        _reBlankTimer.Stop();
         _overlayTimer.Stop();
-        if (_settings.MonitorPowerOff)
+        if (_monitorPowerBlanked)
         {
-            NativeMethods.SetDisplayPower(1);
+            _monitorPowerBlanked = false;
         }
+        else StartDisplayRestore();
 
         foreach (BlankOverlay overlay in _overlays)
         {
@@ -276,25 +319,18 @@ internal sealed class MainForm : Form
         NativeMethods.SetThreadExecutionState(NativeMethods.ES_CONTINUOUS);
     }
 
-    private void CleanupBlankState()
+    private bool TrySetDisplayPower(int state)
     {
-        _overlayTimer.Stop();
-        _reBlankTimer.Stop();
-        _blanked = false;
-        if (_cursorHidden)
+        try { _setDisplayPower(state); return true; }
+        catch (Exception ex)
         {
-            RestoreSystemCursor();
-            _cursorHidden = false;
+            if (!IsDisposed && !_exiting)
+            {
+                _tips.SetToolTip(_blankButton, ex.Message);
+                _trayIcon.ShowBalloonTip(4000, "暗黑天幕", "显示器电源操作失败，请重试。", ToolTipIcon.Warning);
+            }
+            return false;
         }
-        _gammaDim.Restore();
-        NativeMethods.SetThreadExecutionState(NativeMethods.ES_CONTINUOUS);
-        foreach (BlankOverlay overlay in _overlays)
-        {
-            overlay.Close();
-            overlay.Dispose();
-        }
-        _overlays.Clear();
-        UpdateStatus();
     }
 
     private void EnsureOverlaysOnTop()
@@ -318,17 +354,38 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void StartDisplayRestore()
+    {
+        _dimmingCancellation?.Cancel();
+        Task applying = _displayApply;
+        // A timed-out driver call cannot be killed; serialize its eventual restoration.
+        _displayRestore = Task.Run(async () =>
+        {
+            try { await applying; }
+            catch (Exception) { }
+            _restoreBrightness();
+        });
+        _ = _displayRestore.ContinueWith(task => { _ = task.Exception; },
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+    }
+
+    private async Task WaitForDisplayRestoreAsync()
+    {
+        try { await _displayRestore.WaitAsync(_restoreTimeout); }
+        catch (Exception)
+        {
+            if (!IsDisposed && !_exiting)
+                _trayIcon.ShowBalloonTip(4000, "暗黑天幕", "显示器亮度恢复失败或超时，关机请求将继续。", ToolTipIcon.Warning);
+        }
+    }
+
     private void SystemEvents_SessionSwitch(object sender, SessionSwitchEventArgs e)
     {
-        if (e.Reason == SessionSwitchReason.SessionUnlock && _blanked)
+        if (e.Reason == SessionSwitchReason.SessionUnlock && _blanked && !_monitorPowerBlanked)
         {
             foreach (BlankOverlay overlay in _overlays)
             {
                 overlay.BringToFront();
-            }
-            if (_settings.MonitorPowerOff)
-            {
-                NativeMethods.SetDisplayPower(2);
             }
             EnsureOverlaysOnTop();
         }
@@ -340,7 +397,7 @@ internal sealed class MainForm : Form
         Close();
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    protected override async void OnFormClosing(FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing && !_exiting && !_settings.CloseExits)
         {
@@ -353,6 +410,19 @@ internal sealed class MainForm : Form
         if (!e.Cancel)
         {
             _exiting = true;
+            if (_blanked) Unblank();
+            // Let the message loop run while WMI/drivers restore the display.
+            if (!_restoreWaitFinished && !_displayRestore.IsCompleted && e.CloseReason != CloseReason.WindowsShutDown)
+            {
+                e.Cancel = true;
+                if (_waitingForRestore) return;
+                _waitingForRestore = true;
+                try { await WaitForDisplayRestoreAsync(); }
+                finally { _waitingForRestore = false; }
+                _restoreWaitFinished = true;
+                if (!IsDisposed) Close();
+                return;
+            }
             CleanupForExit();
         }
     }
@@ -369,11 +439,7 @@ internal sealed class MainForm : Form
         _shutdown.Cancel();
         if (_blanked)
         {
-            CleanupBlankState();
-            if (_settings.MonitorPowerOff)
-            {
-                NativeMethods.SetDisplayPower(1);
-            }
+            Unblank();
         }
 
         NativeMethods.UnregisterHotKey(Handle, HotkeyId);
@@ -413,10 +479,12 @@ internal sealed class MainForm : Form
     {
         if (disposing)
         {
+            _dimmingCancellation?.Cancel();
+            _dimmingCancellation?.Dispose();
+            _dimmingCancellation = null;
             _tips.Dispose();
             _shutdownTimer.Dispose();
             _shutdown.Cancel();
-            _reBlankTimer.Dispose();
             _overlayTimer.Dispose();
             _trayIcon.Dispose();
         }

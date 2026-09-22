@@ -9,6 +9,8 @@ internal sealed class Settings
     public bool StartToTray { get; set; } = false;
     public bool CloseExits { get; set; } = false;
     public bool AutoStart { get; set; } = false;
+    public bool UseWindowsShutdownCommand { get; set; }
+    public DateTimeOffset? WindowsShutdownDueAt { get; set; }
     public int SettingsWindowX { get; set; } = -1;
     public int SettingsWindowY { get; set; } = -1;
 }

@@ -5,6 +5,7 @@ internal sealed class BlankOverlay : Form
     public event Action? DoubleClicked;
     private DateTime _lastLeftDown = DateTime.MinValue;
     private Point _lastLeftDownLocation;
+    private Cursor? _ownedCursor;
 
     public BlankOverlay(Rectangle bounds)
     {
@@ -14,7 +15,8 @@ internal sealed class BlankOverlay : Form
         StartPosition = FormStartPosition.Manual;
         Bounds = bounds;
         TopMost = true;
-        Cursor = BlankCursor.Create();
+        _ownedCursor = BlankCursor.Create();
+        Cursor = _ownedCursor;
         MouseDown += BlankOverlay_MouseDown;
     }
 
@@ -39,6 +41,18 @@ internal sealed class BlankOverlay : Form
     }
 
     protected override bool ShowWithoutActivation => true;
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing && _ownedCursor is { } cursor)
+        {
+            _ownedCursor = null;
+            IntPtr handle = cursor.Handle;
+            cursor.Dispose();
+            NativeMethods.DestroyCursor(handle);
+        }
+    }
 
     protected override CreateParams CreateParams
     {

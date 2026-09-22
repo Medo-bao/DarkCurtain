@@ -6,6 +6,8 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _closeExitsBox;
     private readonly CheckBox _startTrayBox;
     private readonly CheckBox _autoStartBox;
+    private readonly CheckBox _windowsShutdownBox;
+    private readonly Label _shutdownNotice;
     private readonly ShutdownSchedule _shutdown;
     private readonly NumericUpDown _minutes;
     private readonly Label _scheduleStatus;
@@ -18,8 +20,8 @@ internal sealed class SettingsForm : Form
         Text = "暗黑天幕 · 设置";
         Icon = AppIcons.LoadSmallIcon();
         UiTheme.Apply(this);
-        ClientSize = new Size(560, 620);
-        MinimumSize = SizeFromClientSize(new Size(560, 620));
+        ClientSize = new Size(560, 720);
+        MinimumSize = SizeFromClientSize(new Size(560, 720));
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
@@ -39,7 +41,7 @@ internal sealed class SettingsForm : Form
         title.Margin = new Padding(0, 0, 0, 16);
         layout.Controls.Add(title);
         layout.Controls.Add(UiTheme.Label("常规", true));
-        _monitorPowerBox = Option("同时关闭显示器电源", settings.MonitorPowerOff);
+        _monitorPowerBox = Option("关闭显示器电源", settings.MonitorPowerOff);
         _startTrayBox = Option("启动时最小化到托盘", settings.StartToTray);
         _autoStartBox = Option("开机时自动启动", settings.AutoStart);
         _closeExitsBox = Option("关闭窗口时直接退出", settings.CloseExits);
@@ -49,6 +51,8 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(_closeExitsBox);
         layout.Controls.Add(UiTheme.Divider());
         layout.Controls.Add(UiTheme.Label("定时关机", true));
+        _windowsShutdownBox = Option("定时关机采用 Windows 命令", settings.UseWindowsShutdownCommand);
+        layout.Controls.Add(_windowsShutdownBox);
 
         FlowLayoutPanel time = UiTheme.Actions();
         time.Margin = new Padding(0, 4, 0, 14);
@@ -79,14 +83,17 @@ internal sealed class SettingsForm : Form
 
         FlowLayoutPanel scheduleActions = UiTheme.Actions();
         _scheduleButton = UiTheme.Button("开始计时", light: true);
-        _scheduleButton.Click += (_, _) => _shutdown.Schedule((int)_minutes.Value);
+        _scheduleButton.Click += async (_, _) => await _shutdown.ScheduleAsync((int)_minutes.Value, _windowsShutdownBox.Checked);
         _cancelScheduleButton = UiTheme.Button("取消关机", light: true);
-        _cancelScheduleButton.Click += (_, _) => _shutdown.Cancel();
+        _cancelScheduleButton.Click += async (_, _) => await _shutdown.CancelAsync();
         scheduleActions.Controls.AddRange([_scheduleButton, _cancelScheduleButton]);
         layout.Controls.Add(scheduleActions);
-        Label notice = UiTheme.Label("到时关闭电脑，请保存工作。退出软件会取消计划。");
-        notice.Font = new Font(Font.FontFamily, 8.5F);
-        layout.Controls.Add(notice);
+        _shutdownNotice = UiTheme.Label("");
+        _shutdownNotice.Font = new Font(Font.FontFamily, 8.5F);
+        layout.Controls.Add(_shutdownNotice);
+        layout.SizeChanged += (_, _) => _shutdownNotice.MaximumSize =
+            new Size(Math.Max(100, layout.ClientSize.Width - layout.Padding.Horizontal), 0);
+        _windowsShutdownBox.CheckedChanged += (_, _) => RefreshSchedule();
 
         Button done = UiTheme.Button("保存设置", light: true);
         done.DialogResult = DialogResult.OK;
@@ -116,7 +123,11 @@ internal sealed class SettingsForm : Form
         _scheduleButton.Text = _shutdown.DueAt.HasValue ? "重新计时" : "开始计时";
         _scheduleButton.Enabled = !_shutdown.IsExecuting;
         _minutes.Enabled = !_shutdown.IsExecuting;
-        _cancelScheduleButton.Enabled = _shutdown.DueAt.HasValue;
+        _cancelScheduleButton.Enabled = !_shutdown.IsExecuting && _shutdown.DueAt.HasValue;
+        _windowsShutdownBox.Enabled = !_shutdown.IsExecuting;
+        _shutdownNotice.Text = (_windowsShutdownBox.Checked || _shutdown.UsesWindowsCommand)
+            ? "Windows 计划退出软件后仍生效，到期强制关闭应用，请保存工作。\n取消会撤销当前系统关机计划；切换模式后需重新计时。"
+            : "到时关闭电脑，请保存工作。退出软件会取消计划。";
     }
 
     protected override void Dispose(bool disposing)
@@ -129,4 +140,5 @@ internal sealed class SettingsForm : Form
     public bool CloseExits => _closeExitsBox.Checked;
     public bool StartToTray => _startTrayBox.Checked;
     public bool AutoStart => _autoStartBox.Checked;
+    public bool UseWindowsShutdownCommand => _windowsShutdownBox.Checked;
 }

@@ -9,8 +9,9 @@ internal sealed class GammaDim
     private readonly List<byte> _originalBrightness = [];
     private bool _dimmed;
 
-    public void Apply()
+    public void Apply(CancellationToken cancellationToken = default)
     {
+        _originalBrightness.Clear();
         EnumerateDisplays();
         if (_displays.Count == 0)
         {
@@ -19,14 +20,18 @@ internal sealed class GammaDim
 
         foreach (DisplayRamp display in _displays)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (display.SaveOriginal())
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                _dimmed = true;
                 display.ApplyDark();
             }
         }
         SaveBrightness();
-        SetBacklightBrightness(1);
+        cancellationToken.ThrowIfCancellationRequested();
         _dimmed = true;
+        SetBacklightBrightness(1, cancellationToken);
     }
 
     public void Restore()
@@ -70,7 +75,7 @@ internal sealed class GammaDim
         }
     }
 
-    private void SetBacklightBrightness(byte level)
+    private void SetBacklightBrightness(byte level, CancellationToken cancellationToken)
     {
         try
         {
@@ -79,15 +84,17 @@ internal sealed class GammaDim
                 new WqlObjectQuery("SELECT * FROM WmiMonitorBrightnessMethods"));
             foreach (ManagementObject obj in searcher.Get())
             {
-                ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
-                if (parameters is null)
-                {
-                    continue;
-                }
-                parameters["Brightness"] = level;
-                parameters["Timeout"] = 1;
                 using (obj)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
+                    if (parameters is null)
+                    {
+                        continue;
+                    }
+                    parameters["Brightness"] = level;
+                    parameters["Timeout"] = 1;
+                    cancellationToken.ThrowIfCancellationRequested();
                     _ = obj.InvokeMethod("WmiSetBrightness", parameters, null);
                 }
             }
@@ -119,7 +126,7 @@ internal sealed class GammaDim
                         break;
                     }
                     byte original = _originalBrightness[index++];
-                    ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
+                    using ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
                     if (parameters is null)
                     {
                         continue;
