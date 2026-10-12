@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace ScreenBlank;
 
-internal static class NativeMethods
+internal static partial class NativeMethods
 {
     internal const int WM_SYSCOMMAND = 0x0112;
     internal const int SC_MONITORPOWER = 0xF170;

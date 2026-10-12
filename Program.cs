@@ -3,8 +3,12 @@ using ScreenBlank;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static int Main(string[] args)
     {
+        // A one-shot cleanup helper must bypass the normal single-instance activation.
+        if (args.Length > 0 && args[0] == MemoryCleanupProcess.Argument)
+            return MemoryCleanupProcess.RunHelper(args);
+
         using EventWaitHandle activate = new(false, EventResetMode.AutoReset, "ScreenBlank_Activate");
         using Mutex mutex = new(true, "ScreenBlank_SingleInstance", out bool createdNew);
         if (!createdNew)
@@ -16,7 +20,7 @@ internal static class Program
                 NativeMethods.AllowSetForegroundWindow(processId);
             }
             activate.Set();
-            return;
+            return 0;
         }
 
         ApplicationConfiguration.Initialize();
@@ -31,5 +35,6 @@ internal static class Program
         };
         activationTimer.Start();
         Application.Run(main);
+        return 0;
     }
 }

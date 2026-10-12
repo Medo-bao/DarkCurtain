@@ -9,7 +9,7 @@
     <RootNamespace>ScreenBlank</RootNamespace>
     <Product>暗黑天幕</Product>
     <Description>息屏保护工具：黑屏遮挡，保持电脑不休眠。</Description>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>

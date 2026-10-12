@@ -13,10 +13,18 @@ internal sealed class SettingsForm : Form
     private readonly Label _scheduleStatus;
     private readonly Button _scheduleButton;
     private readonly Button _cancelScheduleButton;
+    private readonly MemoryCleaner _memoryCleaner;
+    private readonly CancellationToken _memoryCancellation;
+    private readonly Dictionary<MemoryCleanItems, CheckBox> _memoryOptions = [];
+    private readonly Button _cleanMemoryButton;
+    private readonly Label _memoryStatus;
 
-    public SettingsForm(Settings settings, ShutdownSchedule shutdown)
+    public SettingsForm(Settings settings, ShutdownSchedule shutdown, MemoryCleaner? memoryCleaner = null,
+        CancellationToken memoryCancellation = default)
     {
         _shutdown = shutdown;
+        _memoryCleaner = memoryCleaner ?? new MemoryCleaner();
+        _memoryCancellation = memoryCancellation;
         Text = "暗黑天幕 · 设置";
         Icon = AppIcons.LoadSmallIcon();
         UiTheme.Apply(this);
@@ -36,6 +44,10 @@ internal sealed class SettingsForm : Form
         DoubleBuffered = true;
 
         TableLayoutPanel layout = UiTheme.Stack(28);
+        layout.Dock = DockStyle.Top;
+        layout.AutoScroll = false;
+        layout.AutoSize = true;
+        layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Label title = UiTheme.Label("设置", true);
         title.Font = new Font(Font.FontFamily, 14F, FontStyle.Bold);
         title.Margin = new Padding(0, 0, 0, 16);
@@ -95,16 +107,74 @@ internal sealed class SettingsForm : Form
             new Size(Math.Max(100, layout.ClientSize.Width - layout.Padding.Horizontal), 0);
         _windowsShutdownBox.CheckedChanged += (_, _) => RefreshSchedule();
 
+        layout.Controls.Add(UiTheme.Divider());
+        layout.Controls.Add(UiTheme.Label("内存清理", true));
+        foreach (MemoryCleanOption option in MemoryCleaner.Options)
+        {
+            CheckBox box = Option(option.Name, settings.MemoryCleanupItems.HasFlag(option.Item));
+            box.CheckedChanged += (_, _) => RefreshMemory();
+            _memoryOptions.Add(option.Item, box);
+            layout.Controls.Add(box);
+        }
+        _cleanMemoryButton = UiTheme.Button("清理所选内存", light: true);
+        _cleanMemoryButton.Click += async (_, _) => await _memoryCleaner.CleanAsync(SelectedMemoryItems, _memoryCancellation);
+        FlowLayoutPanel memoryActions = UiTheme.Actions();
+        memoryActions.Controls.Add(_cleanMemoryButton);
+        layout.Controls.Add(memoryActions);
+        _memoryStatus = UiTheme.Label("内存清理就绪");
+        layout.Controls.Add(_memoryStatus);
+        Label memoryNotice = UiTheme.Label("系统缓存清理需要管理员授权。进程工作集整理会跳过系统关键进程和已识别游戏。\n清理结果显示本次可用内存变化；工作集减少不等于释放了相同数量的物理内存。");
+        memoryNotice.Name = "MemoryCleanupNotice";
+        memoryNotice.Font = new Font(Font.FontFamily, 8.5F);
+        layout.Controls.Add(memoryNotice);
+        layout.SizeChanged += (_, _) =>
+        {
+            int width = Math.Max(100, layout.ClientSize.Width - layout.Padding.Horizontal);
+            _memoryStatus.MaximumSize = new Size(width, 0);
+            memoryNotice.MaximumSize = new Size(width, 0);
+        };
+
         Button done = UiTheme.Button("保存设置", light: true);
         done.DialogResult = DialogResult.OK;
         Button close = UiTheme.Button("关闭", light: true);
         close.DialogResult = DialogResult.Cancel;
-        Controls.Add(layout);
-        Controls.Add(UiTheme.Footer(close, done));
+        Panel scrollContent = new() { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty };
+        scrollContent.ClientSizeChanged += (_, _) =>
+            layout.MaximumSize = new Size(scrollContent.ClientSize.Width, 0);
+        scrollContent.Controls.Add(layout);
+        Control footer = UiTheme.Footer(close, done);
+        footer.Dock = DockStyle.Fill;
+        TableLayoutPanel page = new()
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+            Margin = Padding.Empty, Padding = Padding.Empty
+        };
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.RowStyles.Add(new RowStyle(SizeType.Absolute, footer.Height));
+        page.Controls.Add(scrollContent, 0, 0);
+        page.Controls.Add(footer, 0, 1);
+        Controls.Add(page);
         AcceptButton = done;
         CancelButton = close;
         _shutdown.Changed += RefreshSchedule;
+        _memoryCleaner.Changed += RefreshMemory;
         RefreshSchedule();
+        RefreshMemory();
+    }
+
+    private void RefreshMemory()
+    {
+        if (IsDisposed || Disposing || _cleanMemoryButton is null) return;
+        if (InvokeRequired)
+        {
+            if (IsHandleCreated) BeginInvoke((Action)RefreshMemory);
+            return;
+        }
+        _cleanMemoryButton.Enabled = !_memoryCleaner.IsRunning && MemoryCleaner.ValidItems(SelectedMemoryItems);
+        foreach (CheckBox box in _memoryOptions.Values) box.Enabled = !_memoryCleaner.IsRunning;
+        _memoryStatus.Text = _memoryCleaner.IsRunning ? "正在清理内存…"
+            : _memoryCleaner.LastResult is { } result ? result.Message + "\n" + result.Detail : "内存清理就绪";
     }
 
     private static CheckBox Option(string text, bool value) => new()
@@ -132,7 +202,11 @@ internal sealed class SettingsForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _shutdown.Changed -= RefreshSchedule;
+        if (disposing)
+        {
+            _shutdown.Changed -= RefreshSchedule;
+            _memoryCleaner.Changed -= RefreshMemory;
+        }
         base.Dispose(disposing);
     }
 
@@ -141,4 +215,6 @@ internal sealed class SettingsForm : Form
     public bool StartToTray => _startTrayBox.Checked;
     public bool AutoStart => _autoStartBox.Checked;
     public bool UseWindowsShutdownCommand => _windowsShutdownBox.Checked;
+    public MemoryCleanItems SelectedMemoryItems => _memoryOptions
+        .Where(option => option.Value.Checked).Aggregate(MemoryCleanItems.None, (items, option) => items | option.Key);
 }

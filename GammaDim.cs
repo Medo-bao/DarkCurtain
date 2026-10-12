@@ -7,11 +7,24 @@ internal sealed class GammaDim
 {
     private readonly List<DisplayRamp> _displays = [];
     private readonly List<byte> _originalBrightness = [];
+    private readonly Func<IReadOnlyList<byte>> _readBrightness;
+    private readonly Action<byte, CancellationToken> _setBacklight;
+    private readonly Action<IReadOnlyList<byte>> _restoreBacklight;
     private bool _dimmed;
+
+    public GammaDim(Func<IReadOnlyList<byte>>? readBrightness = null,
+        Action<byte, CancellationToken>? setBacklight = null,
+        Action<IReadOnlyList<byte>>? restoreBacklight = null)
+    {
+        _readBrightness = readBrightness ?? ReadBrightness;
+        _setBacklight = setBacklight ?? SetBacklightBrightness;
+        _restoreBacklight = restoreBacklight ?? RestoreBrightness;
+    }
 
     public void Apply(CancellationToken cancellationToken = default)
     {
-        _originalBrightness.Clear();
+        // Keep a failed restoration's original values until it has actually completed.
+        if (_dimmed) Restore();
         EnumerateDisplays();
         if (_displays.Count == 0)
         {
@@ -28,10 +41,7 @@ internal sealed class GammaDim
                 display.ApplyDark();
             }
         }
-        SaveBrightness();
-        cancellationToken.ThrowIfCancellationRequested();
-        _dimmed = true;
-        SetBacklightBrightness(1, cancellationToken);
+        CaptureAndDimBacklight(cancellationToken);
     }
 
     public void Restore()
@@ -45,13 +55,30 @@ internal sealed class GammaDim
         {
             display.RestoreOriginal();
         }
-        RestoreBrightness();
+        if (_originalBrightness.Count > 0) _restoreBacklight(_originalBrightness);
+        _originalBrightness.Clear();
         _dimmed = false;
     }
 
-    private void SaveBrightness()
+    internal void CaptureAndDimBacklight(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        IReadOnlyList<byte> captured;
+        try { captured = _readBrightness(); }
+        catch (OperationCanceledException) { throw; }
+        catch { return; }
+        // Never dim a backlight whose original brightness could not be saved.
+        if (captured.Count == 0) return;
+        cancellationToken.ThrowIfCancellationRequested();
         _originalBrightness.Clear();
+        _originalBrightness.AddRange(captured);
+        _dimmed = true;
+        _setBacklight(1, cancellationToken);
+    }
+
+    private static IReadOnlyList<byte> ReadBrightness()
+    {
+        List<byte> brightnessValues = [];
         try
         {
             using ManagementObjectSearcher searcher = new(
@@ -65,14 +92,16 @@ internal sealed class GammaDim
                     if (ushort.TryParse(raw?.ToString(), out ushort brightness))
                     {
                         byte value = (byte)Math.Min(100, (int)brightness);
-                        _originalBrightness.Add(value);
+                        brightnessValues.Add(value);
                     }
                 }
             }
         }
         catch (Exception)
         {
+            brightnessValues.Clear();
         }
+        return brightnessValues;
     }
 
     private void SetBacklightBrightness(byte level, CancellationToken cancellationToken)
@@ -104,42 +133,33 @@ internal sealed class GammaDim
         }
     }
 
-    private void RestoreBrightness()
+    private static void RestoreBrightness(IReadOnlyList<byte> originalBrightness)
     {
-        if (_originalBrightness.Count == 0)
+        if (originalBrightness.Count == 0)
         {
             return;
         }
 
-        try
+        using ManagementObjectSearcher searcher = new(
+            new ManagementScope(@"\\.\root\wmi"),
+            new WqlObjectQuery("SELECT * FROM WmiMonitorBrightnessMethods"));
+        using ManagementObjectCollection monitors = searcher.Get();
+        int index = 0;
+        foreach (ManagementObject obj in monitors)
         {
-            using ManagementObjectSearcher searcher = new(
-                new ManagementScope(@"\\.\root\wmi"),
-                new WqlObjectQuery("SELECT * FROM WmiMonitorBrightnessMethods"));
-            int index = 0;
-            foreach (ManagementObject obj in searcher.Get())
+            using (obj)
             {
-                using (obj)
-                {
-                    if (index >= _originalBrightness.Count)
-                    {
-                        break;
-                    }
-                    byte original = _originalBrightness[index++];
-                    using ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
-                    if (parameters is null)
-                    {
-                        continue;
-                    }
-                    parameters["Brightness"] = original;
-                    parameters["Timeout"] = 1;
-                    _ = obj.InvokeMethod("WmiSetBrightness", parameters, null);
-                }
+                if (index >= originalBrightness.Count) break;
+                byte original = originalBrightness[index];
+                using ManagementBaseObject? parameters = obj.GetMethodParameters("WmiSetBrightness");
+                if (parameters is null) throw new InvalidOperationException("显示器没有提供亮度恢复方法");
+                parameters["Brightness"] = original;
+                parameters["Timeout"] = 1;
+                _ = obj.InvokeMethod("WmiSetBrightness", parameters, null);
+                index++;
             }
         }
-        catch (Exception)
-        {
-        }
+        if (index < originalBrightness.Count) throw new InvalidOperationException("未能恢复已保存的显示器亮度");
     }
 
     private void EnumerateDisplays()

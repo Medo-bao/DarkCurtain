@@ -14,6 +14,11 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon _trayIcon;
     private readonly Settings _settings;
     private readonly Button _blankButton;
+    private readonly Button _memoryButton;
+    private readonly Label _memoryStatus;
+    private readonly MemoryCleaner _memoryCleaner;
+    private readonly CancellationTokenSource _memoryCancellation = new();
+    private ToolStripMenuItem? _memoryMenuItem;
     private readonly ToolTip _tips = new();
     private readonly ShutdownSchedule _shutdown;
     private readonly System.Windows.Forms.Timer _shutdownTimer;
@@ -35,15 +40,17 @@ internal sealed class MainForm : Form
     private bool _cursorHidden;
     private bool _exiting;
     private bool _cleanupDone;
+    private bool _memoryDisposed;
     private bool _initialVisibilityHandled;
     private bool _restoringWindow;
     private SettingsForm? _settingsForm;
 
     public MainForm(Settings settings, Action? restoreBrightness = null, Func<Task>? requestShutdown = null,
         Action<CancellationToken>? applyBrightness = null, TimeSpan? restoreTimeout = null,
-        Action<int>? setDisplayPower = null)
+        Action<int>? setDisplayPower = null, MemoryCleaner? memoryCleaner = null)
     {
         _settings = settings;
+        _memoryCleaner = memoryCleaner ?? new MemoryCleaner();
         _restoreBrightness = restoreBrightness ?? _gammaDim.Restore;
         _applyBrightness = applyBrightness ?? _gammaDim.Apply;
         _restoreTimeout = restoreTimeout ?? TimeSpan.FromSeconds(3);
@@ -55,7 +62,7 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         StartPosition = FormStartPosition.CenterScreen;
         UiTheme.Apply(this);
-        ClientSize = new Size(460, 180);
+        ClientSize = new Size(460, 176);
         MaximizeBox = false;
         DoubleBuffered = true;
 
@@ -76,13 +83,19 @@ internal sealed class MainForm : Form
         _shutdownTimer.Start();
 
         TableLayoutPanel layout = UiTheme.Stack(28);
+        layout.Padding = new Padding(28, 24, 28, 20);
+        layout.AutoScroll = false;
+        layout.AutoSize = true;
+        layout.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        layout.Dock = DockStyle.Top;
         TableLayoutPanel brand = new()
         {
-            ColumnCount = 3, AutoSize = true, Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 0, 20)
+            ColumnCount = 4, AutoSize = true, Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 12)
         };
         brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
         brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
         brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40));
         brand.Controls.Add(new PictureBox
         {
@@ -95,6 +108,10 @@ internal sealed class MainForm : Form
         title.TextAlign = ContentAlignment.MiddleLeft;
         title.Margin = Padding.Empty;
         brand.Controls.Add(title);
+        _memoryButton = UiTheme.IconButton("\uEA99", "清理内存", _tips);
+        _memoryButton.Margin = new Padding(0, 0, 8, 0);
+        _memoryButton.Click += async (_, _) => await CleanMemoryAsync();
+        brand.Controls.Add(_memoryButton);
         Button settingsButton = UiTheme.IconButton("\uE713", "设置", _tips);
         settingsButton.Click += (_, _) => ShowSettings();
         brand.Controls.Add(settingsButton);
@@ -104,9 +121,14 @@ internal sealed class MainForm : Form
         _blankButton.Dock = DockStyle.Fill;
         _blankButton.Height = 48;
         _blankButton.Font = new Font(Font.FontFamily, 10F, FontStyle.Regular);
-        _blankButton.Margin = new Padding(0, 0, 0, 6);
+        _blankButton.Margin = new Padding(0, 0, 0, 8);
         _blankButton.Click += (_, _) => ToggleBlank();
         layout.Controls.Add(_blankButton);
+        _memoryStatus = UiTheme.Label("内存清理就绪");
+        _memoryStatus.MaximumSize = new Size(404, 0);
+        _memoryStatus.Margin = Padding.Empty;
+        layout.Controls.Add(_memoryStatus);
+        layout.SizeChanged += (_, _) => FitMainContent();
         Controls.Add(layout);
 
         _trayIcon = new NotifyIcon
@@ -117,6 +139,8 @@ internal sealed class MainForm : Form
             ContextMenuStrip = BuildMenu()
         };
         _trayIcon.DoubleClick += (_, _) => ShowMainWindow();
+        _memoryCleaner.Changed += RefreshMemory;
+        RefreshMemory();
 
         _overlayTimer = new System.Windows.Forms.Timer { Interval = 250 };
         _overlayTimer.Tick += (_, _) => EnsureOverlaysOnTop();
@@ -152,6 +176,9 @@ internal sealed class MainForm : Form
     {
         ContextMenuStrip menu = new();
         menu.Items.Add("立即息屏", null, (_, _) => Blank());
+        _memoryMenuItem = new ToolStripMenuItem("清理内存");
+        _memoryMenuItem.Click += async (_, _) => await CleanMemoryAsync();
+        menu.Items.Add(_memoryMenuItem);
         menu.Items.Add("设置...", null, (_, _) => ShowSettings());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Exit());
@@ -189,7 +216,16 @@ internal sealed class MainForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        FitMainContent();
         if (!_restoringWindow && WindowState == FormWindowState.Minimized) Hide();
+    }
+
+    private void FitMainContent()
+    {
+        if (!IsDisposed && !Disposing && WindowState == FormWindowState.Normal
+            && _memoryStatus?.Parent is TableLayoutPanel layout && layout.Height > 0
+            && ClientSize.Height != layout.Height)
+            ClientSize = new Size(ClientSize.Width, layout.Height);
     }
 
     private void ShowSettings()
@@ -200,24 +236,59 @@ internal sealed class MainForm : Form
             _settingsForm.Activate();
             return;
         }
-        using SettingsForm form = new(_settings, _shutdown);
+        using SettingsForm form = new(_settings, _shutdown, _memoryCleaner, _memoryCancellation.Token);
         _settingsForm = form;
         try
         {
-            if (form.ShowDialog(this) == DialogResult.OK)
+            bool saveRequested = form.ShowDialog(this) == DialogResult.OK;
+            if (saveRequested)
             {
                 _settings.MonitorPowerOff = form.MonitorPowerOff;
                 _settings.StartToTray = form.StartToTray;
                 _settings.CloseExits = form.CloseExits;
                 _settings.AutoStart = form.AutoStart;
                 _settings.UseWindowsShutdownCommand = form.UseWindowsShutdownCommand;
+                _settings.MemoryCleanupItems = form.SelectedMemoryItems;
             }
             _settings.SettingsWindowX = form.Location.X;
             _settings.SettingsWindowY = form.Location.Y;
-            SettingsStore.Save(_settings);
-            StartupManager.Apply(_settings.AutoStart);
+            string? saveError = SettingsStore.Save(_settings);
+            string? startupError = StartupManager.Apply(_settings.AutoStart);
+            if (saveRequested && !_exiting && !IsDisposed && (saveError is not null || startupError is not null))
+            {
+                List<string> errors = [];
+                if (saveError is not null) errors.Add("当前设置已应用，但保存失败，下次启动可能恢复原设置：\n" + saveError);
+                if (startupError is not null) errors.Add("开机自启设置未生效：\n" + startupError);
+                MessageBox.Show(this, string.Join("\n\n", errors), "设置未完全生效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            RefreshMemory();
         }
         finally { _settingsForm = null; }
+    }
+
+    private async Task CleanMemoryAsync()
+    {
+        if (_exiting || IsDisposed || _memoryCleaner.IsRunning) return;
+        MemoryCleanupResult result = await _memoryCleaner.CleanAsync(_settings.MemoryCleanupItems, _memoryCancellation.Token);
+        if (_exiting || IsDisposed) return;
+        _trayIcon.ShowBalloonTip(4000, "内存清理", result.Message,
+            result.Success ? ToolTipIcon.Info : ToolTipIcon.Warning);
+    }
+
+    private void RefreshMemory()
+    {
+        if (IsDisposed || Disposing) return;
+        if (InvokeRequired)
+        {
+            if (IsHandleCreated) BeginInvoke((Action)RefreshMemory);
+            return;
+        }
+        bool ready = !_exiting && !_memoryCleaner.IsRunning && MemoryCleaner.ValidItems(_settings.MemoryCleanupItems);
+        _memoryButton.Enabled = ready;
+        if (_memoryMenuItem is not null) _memoryMenuItem.Enabled = ready;
+        _memoryStatus.Text = _memoryCleaner.IsRunning ? "正在清理内存…"
+            : _memoryCleaner.LastResult?.Message ?? "内存清理就绪";
+        _tips.SetToolTip(_memoryStatus, _memoryCleaner.LastResult?.Detail ?? "清理项目可在设置中选择");
     }
 
     private void ToggleBlank()
@@ -435,6 +506,7 @@ internal sealed class MainForm : Form
         }
 
         _cleanupDone = true;
+        _memoryCancellation.Cancel();
         _shutdownTimer.Stop();
         _shutdown.Cancel();
         if (_blanked)
@@ -479,6 +551,13 @@ internal sealed class MainForm : Form
     {
         if (disposing)
         {
+            _memoryCleaner.Changed -= RefreshMemory;
+            if (!_memoryDisposed)
+            {
+                _memoryCancellation.Cancel();
+                _memoryCancellation.Dispose();
+                _memoryDisposed = true;
+            }
             _dimmingCancellation?.Cancel();
             _dimmingCancellation?.Dispose();
             _dimmingCancellation = null;

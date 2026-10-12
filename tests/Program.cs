@@ -3,14 +3,47 @@ using System.Drawing.Imaging;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-internal static class Tests
+internal static partial class Tests
 {
+    private static int _checkCount;
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--memory-helper-watch")
+        {
+            Environment.ExitCode = MemoryCleanupProcess.RunHelper([MemoryCleanupProcess.Argument, args[1]],
+                (request, token) =>
+                {
+                    Console.WriteLine("running");
+                    Console.Out.Flush();
+                    if (!token.WaitHandle.WaitOne(10000)) return SuccessfulMemoryResult(request.Items);
+                    token.ThrowIfCancellationRequested();
+                    return SuccessfulMemoryResult(request.Items);
+                });
+            return;
+        }
+        if (args.Length > 0 && args[0] == MemoryCleanupProcess.Argument)
+        {
+            Environment.ExitCode = MemoryCleanupProcess.RunHelper(args);
+            return;
+        }
+        if (args is ["--memory-probe"])
+        {
+            RunMemoryProbe();
+            return;
+        }
+        if (args is ["--memory-helper-exit"]) return;
+        if (args is ["--verify-functional-fixes"])
+        {
+            ApplicationConfiguration.Initialize();
+            VerifyFunctionalFixes();
+            RequireCheckCount(6);
+            return;
+        }
         if (args.Length == 2 && args[0] == "--verify-release")
         {
             VerifyRelease(args[1]);
+            RequireCheckCount(7);
             return;
         }
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -185,6 +218,9 @@ internal static class Tests
         trayStart.ShowMainWindow();
         Check(trayStart.Visible, "Start-to-tray window can be restored");
         trayStart.Close();
+        VerifyMemoryCleanup();
+        VerifyFunctionalFixes();
+        RequireCheckCount(123);
         Console.WriteLine("PASS: All checks; no real shutdown requested.");
     }
 
@@ -543,7 +579,8 @@ internal static class Tests
         if (Mutex.TryOpenExisting("ScreenBlank_SingleInstance", out Mutex? existing))
         {
             existing.Dispose();
-            throw new InvalidOperationException("Exit the running app before the release activation test.");
+            VerifyReleaseHelperWithRunningApp(executable);
+            return;
         }
         using Process first = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden })!;
         try
@@ -555,7 +592,16 @@ internal static class Tests
                 NativeMethods.GetWindowThreadProcessId(window, out uint id);
                 return window != IntPtr.Zero && id == first.Id;
             }, "Published app creates its main window");
-            for (int attempt = 0; attempt < 2; attempt++)
+            bool hasMemoryButton = false;
+            EnumChildWindows(window, (child, _) =>
+            {
+                System.Text.StringBuilder caption = new(128);
+                GetWindowText(child, caption, caption.Capacity);
+                if (caption.ToString() == "\uEA99") hasMemoryButton = true;
+                return true;
+            }, IntPtr.Zero);
+            Check(hasMemoryButton, "Published main window exposes direct memory cleanup");
+            for (int attempt = 0; attempt < 1; attempt++)
             {
                 NativeMethods.SendMessage(window, NativeMethods.WM_SYSCOMMAND, new IntPtr(0xF020), IntPtr.Zero);
                 WaitUntil(() => !IsWindowVisible(window), "Published app minimizes to tray");
@@ -570,6 +616,23 @@ internal static class Tests
                     if (!second.HasExited) { second.Kill(); second.WaitForExit(); }
                 }
             }
+            Task<MemoryCleanupResult> helper = MemoryCleanupProcess.RunAsync(new(MemoryCleanItems.None, Environment.ProcessId),
+                startProcess: start =>
+                {
+                    // An invalid request exercises the published helper without changing system memory or opening UAC.
+                    start.FileName = executable;
+                    start.UseShellExecute = false;
+                    start.Verb = "";
+                    start.CreateNoWindow = true;
+                    return Process.Start(start);
+                });
+            PumpMemoryUntil(() => helper.IsCompleted);
+            MemoryCleanupResult helperResult = helper.GetAwaiter().GetResult();
+            Check(!helperResult.Success && helperResult.Error?.Contains("无效") == true,
+                "Published cleanup helper bypasses the existing instance and returns its result");
+            NativeMethods.GetWindowThreadProcessId(window, out uint owner);
+            Check(!first.HasExited && owner == first.Id && IsWindowVisible(window),
+                "Published cleanup helper leaves the original main window running");
         }
         finally
         {
@@ -589,6 +652,14 @@ internal static class Tests
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr window);
+
+    private delegate bool ChildWindowCallback(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr window, ChildWindowCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int count);
 
     private static IEnumerable<Control> Descendants(Control parent)
     {
@@ -639,6 +710,14 @@ internal static class Tests
     private static void Check(bool condition, string name)
     {
         if (!condition) throw new InvalidOperationException(name);
+        _checkCount++;
         Console.WriteLine("PASS: " + name);
+    }
+
+    private static void RequireCheckCount(int expected)
+    {
+        if (_checkCount != expected)
+            throw new InvalidOperationException($"Expected exactly {expected} checks, got {_checkCount}.");
+        Console.WriteLine($"CHECK_COUNT: {_checkCount}/{expected}");
     }
 }
