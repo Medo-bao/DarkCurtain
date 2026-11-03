@@ -249,6 +249,7 @@ internal sealed class MainForm : Form
                 _settings.AutoStart = form.AutoStart;
                 _settings.UseWindowsShutdownCommand = form.UseWindowsShutdownCommand;
                 _settings.MemoryCleanupItems = form.SelectedMemoryItems;
+                _settings.NotifyMemoryCleanupCompleted = form.NotifyMemoryCleanupCompleted;
             }
             _settings.SettingsWindowX = form.Location.X;
             _settings.SettingsWindowY = form.Location.Y;
@@ -270,7 +271,7 @@ internal sealed class MainForm : Form
     {
         if (_exiting || IsDisposed || _memoryCleaner.IsRunning) return;
         MemoryCleanupResult result = await _memoryCleaner.CleanAsync(_settings.MemoryCleanupItems, _memoryCancellation.Token);
-        if (_exiting || IsDisposed) return;
+        if (_exiting || IsDisposed || !_settings.NotifyMemoryCleanupCompleted) return;
         _trayIcon.ShowBalloonTip(4000, "内存清理", result.Message,
             result.Success ? ToolTipIcon.Info : ToolTipIcon.Warning);
     }

@@ -12,6 +12,7 @@ internal sealed class Settings
     public bool UseWindowsShutdownCommand { get; set; }
     public DateTimeOffset? WindowsShutdownDueAt { get; set; }
     public MemoryCleanItems MemoryCleanupItems { get; set; } = MemoryCleanItems.Default;
+    public bool NotifyMemoryCleanupCompleted { get; set; } = true;
     public int SettingsWindowX { get; set; } = -1;
     public int SettingsWindowY { get; set; } = -1;
 }

@@ -16,6 +16,7 @@ internal sealed class SettingsForm : Form
     private readonly MemoryCleaner _memoryCleaner;
     private readonly CancellationToken _memoryCancellation;
     private readonly Dictionary<MemoryCleanItems, CheckBox> _memoryOptions = [];
+    private readonly CheckBox _muteMemoryNotificationBox;
     private readonly Button _cleanMemoryButton;
     private readonly Label _memoryStatus;
 
@@ -61,6 +62,11 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(_startTrayBox);
         layout.Controls.Add(_autoStartBox);
         layout.Controls.Add(_closeExitsBox);
+        Label blankingNotice = UiTheme.Label("息屏快捷键：Ctrl+Alt+B\n退出息屏：再次按 Ctrl+Alt+B，或双击黑幕。");
+        blankingNotice.Font = new Font(Font.FontFamily, 8.5F);
+        layout.Controls.Add(blankingNotice);
+        layout.SizeChanged += (_, _) => blankingNotice.MaximumSize =
+            new Size(Math.Max(100, layout.ClientSize.Width - layout.Padding.Horizontal), 0);
         layout.Controls.Add(UiTheme.Divider());
         layout.Controls.Add(UiTheme.Label("定时关机", true));
         _windowsShutdownBox = Option("定时关机采用 Windows 命令", settings.UseWindowsShutdownCommand);
@@ -116,6 +122,9 @@ internal sealed class SettingsForm : Form
             _memoryOptions.Add(option.Item, box);
             layout.Controls.Add(box);
         }
+        _muteMemoryNotificationBox = Option("关闭清理完成通知", !settings.NotifyMemoryCleanupCompleted);
+        _muteMemoryNotificationBox.Margin = new Padding(0, 8, 0, 6);
+        layout.Controls.Add(_muteMemoryNotificationBox);
         _cleanMemoryButton = UiTheme.Button("清理所选内存", light: true);
         _cleanMemoryButton.Click += async (_, _) => await _memoryCleaner.CleanAsync(SelectedMemoryItems, _memoryCancellation);
         FlowLayoutPanel memoryActions = UiTheme.Actions();
@@ -197,7 +206,7 @@ internal sealed class SettingsForm : Form
         _windowsShutdownBox.Enabled = !_shutdown.IsExecuting;
         _shutdownNotice.Text = (_windowsShutdownBox.Checked || _shutdown.UsesWindowsCommand)
             ? "Windows 计划退出软件后仍生效，到期强制关闭应用，请保存工作。\n取消会撤销当前系统关机计划；切换模式后需重新计时。"
-            : "到时关闭电脑，请保存工作。退出软件会取消计划。";
+            : "退出软件会取消计划；电脑锁定时可能无法关机。需锁屏关机可选择 Windows 命令模式，该模式会强制关闭应用，请保存工作。";
     }
 
     protected override void Dispose(bool disposing)
@@ -215,6 +224,7 @@ internal sealed class SettingsForm : Form
     public bool StartToTray => _startTrayBox.Checked;
     public bool AutoStart => _autoStartBox.Checked;
     public bool UseWindowsShutdownCommand => _windowsShutdownBox.Checked;
+    public bool NotifyMemoryCleanupCompleted => !_muteMemoryNotificationBox.Checked;
     public MemoryCleanItems SelectedMemoryItems => _memoryOptions
         .Where(option => option.Value.Checked).Aggregate(MemoryCleanItems.None, (items, option) => items | option.Key);
 }

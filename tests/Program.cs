@@ -42,8 +42,9 @@ internal static partial class Tests
         }
         if (args.Length == 2 && args[0] == "--verify-release")
         {
+            VerifyLockedMachineShutdown().GetAwaiter().GetResult();
             VerifyRelease(args[1]);
-            RequireCheckCount(7);
+            RequireCheckCount(8);
             return;
         }
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -220,7 +221,7 @@ internal static partial class Tests
         trayStart.Close();
         VerifyMemoryCleanup();
         VerifyFunctionalFixes();
-        RequireCheckCount(123);
+        RequireCheckCount(124);
         Console.WriteLine("PASS: All checks; no real shutdown requested.");
     }
 
@@ -304,8 +305,20 @@ internal static partial class Tests
         Check(brightnessCalls == 0, "Power-only entry, recovery and exit never adjust brightness");
     }
 
+    private static async Task VerifyLockedMachineShutdown()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        ShutdownSchedule locked = new(() => Task.FromException(new ShutdownCommandException(1271, "locked")), () => now);
+        locked.Schedule(1);
+        now = now.AddMinutes(1);
+        await locked.TickAsync();
+        Check(locked.Error is not null && locked.Error.Contains("1271") && locked.Error.Contains("Windows 命令") && locked.Error.Contains("强制"),
+            "Locked-machine shutdown failure explains the explicit force option and its risk");
+    }
+
     private static async Task VerifyWindowsShutdownMode()
     {
+        await VerifyLockedMachineShutdown();
         DateTimeOffset now = DateTimeOffset.UtcNow;
         List<string> commands = [];
         int localCalls = 0;

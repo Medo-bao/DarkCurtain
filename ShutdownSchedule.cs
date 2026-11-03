@@ -125,6 +125,10 @@ internal sealed class ShutdownSchedule
         IsExecuting = true;
         Changed?.Invoke();
         try { await _shutdown(); }
+        catch (ShutdownCommandException ex) when (ex.ExitCode == 1271)
+        {
+            Error = "电脑已锁定，无法安全关机（1271）。请保存工作，勾选“定时关机采用 Windows 命令”后重新计时；该模式会强制关闭应用。";
+        }
         catch (Exception ex) { Error = ex.Message; }
         finally
         {
