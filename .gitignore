@@ -2,6 +2,6 @@ bin/
 obj/
 release-ui/
 release/
-tests/artifacts/
+/tests/
 *.user
 *.suo
